@@ -1,0 +1,5 @@
+1.pip install mediapipe==0.10.13
+
+2.pip install scikit-learn
+
+3. run batch file ( order: collect, train, test )
