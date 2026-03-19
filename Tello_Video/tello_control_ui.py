@@ -53,6 +53,7 @@ class TelloUI:
         # gesture control setup
         self.gesture_mode = False
         self.gesture_buffer = deque(maxlen=15)
+        self.last_gesture_time = 0
         with open('model/gesture_model.pkl', 'rb') as f:
             self.gesture_model = pickle.load(f)
         self.hands = mp_hands.Hands(
@@ -171,21 +172,27 @@ class TelloUI:
             print("[INFO] Gesture control OFF")
 
     def dispatchGestureCommand(self, gesture_id):
-        """Map a recognised gesture ID to a drone command."""
+        # cooldown — only fire once every 2 seconds
+        now = time.time()
+        if now - self.last_gesture_time < 2.0:
+            return
+        self.last_gesture_time = now
+        self.gesture_buffer.clear()
+
         gesture_name, command = GESTURES[gesture_id]
         print(f"[GESTURE] {gesture_name} → {command}")
         if gesture_id == 0:
-            self.tello.send_command('stop')    # hover / stop
+            self.tello.send_command('command')  # hover, not stop
         elif gesture_id == 1:
-            self.telloLanding()                # land
+            self.telloLanding()
         elif gesture_id == 2:
-            self.telloUp(self.distance)        # move up
+            self.telloUp(self.distance)
         elif gesture_id == 3:
-            self.telloDown(self.distance)      # move down
+            self.telloDown(self.distance)
         elif gesture_id == 4:
-            self.tello.rotate_ccw(self.degree) # rotate left
+            self.tello.rotate_ccw(self.degree)
         elif gesture_id == 5:
-            self.tello.rotate_cw(self.degree)  # rotate right
+            self.tello.rotate_cw(self.degree)
 
     def openCmdWindow(self):
         """Open the command panel window."""
