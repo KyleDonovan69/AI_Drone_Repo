@@ -8,7 +8,7 @@ def main():
     # make sure img folder exists so snapshots don't crash
     os.makedirs('./img', exist_ok=True)
 
-    drone = tello.Tello('0.0.0.0', 8889)  # fixed empty string
+    drone = tello.Tello('0.0.0.0', 8889) 
     vplayer = TelloUI(drone, "./img/")
 
     # start the Tkinter mainloop
