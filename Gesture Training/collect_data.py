@@ -18,7 +18,7 @@ GESTURES = {
     '5': ('Point Right', 'Rotate Right'),
 }
 
-# make sure data folder exists
+# make sure data folder exist
 os.makedirs('data', exist_ok=True)
 CSV_PATH = 'data/keypoints.csv'
 
