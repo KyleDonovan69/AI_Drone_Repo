@@ -1,0 +1,7 @@
+How mode switching works:
+
+Show  Peace Sign → label goes orange showing pending mode
+Show  Thumbs Up → confirms and switches, label changes colour
+
+
+Green = Manual, Blue = Gesture Control, Red = Hunt Mode
