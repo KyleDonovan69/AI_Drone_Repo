@@ -17,6 +17,8 @@ GESTURES = {
     3: ('Point Down',  'Move Down'),
     4: ('Point Left',  'Rotate Left'),
     5: ('Point Right', 'Rotate Right'),
+    6: ('Peace Sign',  'Next Mode'),
+    7: ('Thumbs Up',   'Confirm Mode'),
 }
 
 # load trained model

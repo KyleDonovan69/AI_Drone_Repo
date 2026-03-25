@@ -16,9 +16,11 @@ GESTURES = {
     '3': ('Point Down',  'Move Down'),
     '4': ('Point Left',  'Rotate Left'),
     '5': ('Point Right', 'Rotate Right'),
+    '6': ('Peace Sign',  'Next Mode'),
+    '7': ('Thumbs Up',   'Confirm Mode'),
 }
 
-# make sure data folder exist
+# make sure data folder exists
 os.makedirs('data', exist_ok=True)
 CSV_PATH = 'data/keypoints.csv'
 
