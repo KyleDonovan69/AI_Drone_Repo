@@ -14,6 +14,8 @@ GESTURES = {
     '3': 'Point Down',
     '4': 'Point Left',
     '5': 'Point Right',
+    '6': 'Peace Sign',
+    '7': 'Thumbs Up',
 }
 
 print("Loading data...")

@@ -2,9 +2,9 @@ import cv2
 import mediapipe as mp
 
 # setup
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils # type: ignore[attr-defined]
+mp_drawing_styles = mp.solutions.drawing_styles # type: ignore[attr-defined]
+mp_hands = mp.solutions.hands # type: ignore[attr-defined]
 
 cap = cv2.VideoCapture(0)
 

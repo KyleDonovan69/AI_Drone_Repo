@@ -7,34 +7,69 @@ import datetime
 import cv2
 import os
 import time
-import platform
+import mediapipe as mp
+import pickle
+from collections import deque
+
+from person_follower import PersonFollower
+
+# mediapipe setup
+mp_drawing = mp.solutions.drawing_utils # type: ignore[attr-defined]
+mp_drawing_styles = mp.solutions.drawing_styles # type: ignore[attr-defined]
+mp_hands = mp.solutions.hands # type: ignore[attr-defined]
+
+# gesture labels
+GESTURES = {
+    0: ('Open Palm',   'Hover / Stop'),
+    1: ('Fist',        'Land'),
+    2: ('Point Up',    'Move Up'),
+    3: ('Point Down',  'Move Down'),
+    4: ('Point Left',  'Rotate Left'),
+    5: ('Point Right', 'Rotate Right'),
+    6: ('Peace Sign',  'Next Mode'),
+    7: ('Thumbs Up',   'Toggle Follow'),  # activates/deactivates person following
+}
+
 
 class TelloUI:
     """Wrapper class to enable the GUI."""
 
-    def __init__(self,tello,outputpath):
+    def __init__(self, tello, outputpath):
         """
-        Initial all the element of the GUI,support by Tkinter
+        Initial all the element of the GUI, support by Tkinter.
 
         :param tello: class interacts with the Tello drone.
+        :param outputpath: path to save snapshots.
+        """
 
-        Raises:
-            RuntimeError: If the Tello rejects the attempt to enter command mode.
-        """        
+        self.tello = tello
+        self.outputPath = outputpath
+        self.frame = None
+        self.thread = None
 
-        self.tello = tello # videostream device
-        self.outputPath = outputpath # the path that save pictures created by clicking the takeSnapshot button 
-        self.frame = None  # frame read from h264decoder and used for pose recognition 
-        self.thread = None # thread of the Tkinter mainloop
-        self.stopEvent = None  
-        
         # control variables
         self.distance = 0.2  # default distance for 'move' cmd
-        self.degree = 30  # default degree for 'cw' or 'ccw' cmd
+        self.degree = 30     # default degree for 'cw' or 'ccw' cmd
 
-        # if the flag is TRUE,the auto-takeoff thread will stop waiting for the response from tello
         self.quit_waiting_flag = False
-        
+
+        # gesture control setup
+        self.gesture_mode = False
+        self.gesture_buffer = deque(maxlen=15)
+        self.last_gesture_time = 0
+        model_path = os.path.join(os.path.dirname(__file__), 'model', 'gesture_model.pkl')
+        with open(model_path, 'rb') as f:
+            self.gesture_model = pickle.load(f)
+        self.hands = mp_hands.Hands(
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7)
+        print("[INFO] Gesture model loaded")
+
+        # person follower setup -- activated with thumbs up gesture
+        self.person_follower = PersonFollower(tello)
+        print("[INFO] Person follower initialised")
+
         # initialize the root window and image panel
         self.root = tki.Tk()
         self.panel = None
@@ -43,19 +78,31 @@ class TelloUI:
         self.btn_snapshot = tki.Button(self.root, text="Snapshot!",
                                        command=self.takeSnapshot)
         self.btn_snapshot.pack(side="bottom", fill="both",
-                               expand="yes", padx=10, pady=5)
+                               expand=True, padx=10, pady=5)
 
-        self.btn_pause = tki.Button(self.root, text="Pause", relief="raised", command=self.pauseVideo)
+        self.btn_pause = tki.Button(self.root, text="Pause", relief="raised",
+                                    command=self.pauseVideo)
         self.btn_pause.pack(side="bottom", fill="both",
-                            expand="yes", padx=10, pady=5)
+                            expand=True, padx=10, pady=5)
 
-        self.btn_landing = tki.Button(
-            self.root, text="Open Command Panel", relief="raised", command=self.openCmdWindow)
-        self.btn_landing.pack(side="bottom", fill="both",
-                              expand="yes", padx=10, pady=5)
-        
-        # start a thread that constantly pools the video sensor for
-        # the most recently read frame
+        self.btn_cmd = tki.Button(self.root, text="Open Command Panel",
+                                  relief="raised", command=self.openCmdWindow)
+        self.btn_cmd.pack(side="bottom", fill="both",
+                          expand=True, padx=10, pady=5)
+
+        # gesture toggle button
+        self.btn_gesture = tki.Button(self.root, text="Gesture Control: OFF",
+                                      relief="raised", command=self.toggleGestureMode)
+        self.btn_gesture.pack(side="bottom", fill="both",
+                              expand=True, padx=10, pady=5)
+
+        # follow mode toggle button -- also toggled by Thumbs Up gesture
+        self.btn_follow = tki.Button(self.root, text="Follow Mode: OFF",
+                                     relief="raised", command=self._toggleFollow)
+        self.btn_follow.pack(side="bottom", fill="both",
+                             expand=True, padx=10, pady=5)
+
+        # start video loop thread
         self.stopEvent = threading.Event()
         self.thread = threading.Thread(target=self.videoLoop, args=())
         self.thread.start()
@@ -64,81 +111,139 @@ class TelloUI:
         self.root.wm_title("TELLO Controller")
         self.root.wm_protocol("WM_DELETE_WINDOW", self.onClose)
 
-        # the sending_command will send command to tello every 5 seconds
-        self.sending_command_thread = threading.Thread(target = self._sendingCommand)
+        # sending_command sends 'command' to tello every 5 seconds to keep connection alive
+        self.sending_command_thread = threading.Thread(target=self._sendingCommand)
+
     def videoLoop(self):
         """
-        The mainloop thread of Tkinter 
+        The mainloop thread of Tkinter.
         Raises:
             RuntimeError: To get around a RunTime error that Tkinter throws due to threading.
         """
         try:
-            # start the thread that get GUI image and drwa skeleton 
             time.sleep(0.5)
             self.sending_command_thread.start()
-            while not self.stopEvent.is_set():
-            # read the frame for GUI show
-                self.frame = self.tello.read()
-                if self.frame is None or self.frame.size == 0:
-                    continue 
-            
-            # transfer the format from frame to image         
-                image = Image.fromarray(self.frame)
 
-            # we found compatibility problem between Tkinter,PIL and Macos,and it will 
-            # sometimes result the very long preriod of the "ImageTk.PhotoImage" function,
-            # so for Macos,we start a new thread to execute the _updateGUIImage function.
+            while not self.stopEvent.is_set():
+                self.frame = self.tello.read()
+
+                if self.frame is None or self.frame.size == 0:
+                    continue
+
+                display_frame = self.frame.copy()
+
+                # --- gesture recognition ---
+                if self.gesture_mode:
+                    rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                    result = self.hands.process(rgb)
+                    if result.multi_hand_landmarks:
+                        for hand_lm in result.multi_hand_landmarks:
+                            mp_drawing.draw_landmarks(
+                                display_frame, hand_lm, mp_hands.HAND_CONNECTIONS,
+                                mp_drawing_styles.get_default_hand_landmarks_style(),
+                                mp_drawing_styles.get_default_hand_connections_style())
+                        lm = result.multi_hand_landmarks[0].landmark
+                        keypoints = [v for point in lm for v in (point.x, point.y)]
+                        pred = self.gesture_model.predict([keypoints])[0]
+                        self.gesture_buffer.append(pred)
+                        if len(self.gesture_buffer) == 15 and len(set(self.gesture_buffer)) == 1:
+                            self.dispatchGestureCommand(pred)
+                    else:
+                        self.gesture_buffer.clear()
+                # --- end gesture recognition ---
+
+                # run pose detection and RC control for person following
+                display_frame = self.person_follower.process_frame(display_frame)
+
+                # convert BGR to RGB before passing to PIL -- drone frames are BGR
+                image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                 self.root.after(0, self._updateGUIImage, image)
                 time.sleep(0.03)
+
         except RuntimeError as e:
             print("[INFO] caught a RuntimeError")
 
-           
-    def _updateGUIImage(self,image):
-        """
-        Main operation to initial the object of image,and update the GUI panel 
-        """  
-        image = ImageTk.PhotoImage(image)
-        # if the panel none ,we need to initial it
+    def _updateGUIImage(self, image):
+        """Main operation to update the GUI panel."""
+        photo = ImageTk.PhotoImage(image)
         if self.panel is None:
-            self.panel = tki.Label(image=image)
-            self.panel.image = image
+            self.panel = tki.Label(image=photo)
+            self.panel.image = photo  # type: ignore[attr-defined]
             self.panel.pack(side="left", padx=10, pady=10)
-        # otherwise, simply update the panel
         else:
-            self.panel.configure(image=image)
-            self.panel.image = image
+            self.panel.configure(image=photo)
+            self.panel.image = photo  # type: ignore[attr-defined]
 
-            
     def _sendingCommand(self):
-        """
-        start a while loop that sends 'command' to tello every 5 second
-        """    
-
+        """Send 'command' to tello every 5 seconds to keep connection alive."""
         while not self.stopEvent.is_set():
             if hasattr(self, 'tello'):
                 self.tello.send_command('command')
             time.sleep(5)
 
-    def _setQuitWaitingFlag(self):  
-        """
-        set the variable as TRUE,it will stop computer waiting for response from tello  
-        """       
-        self.quit_waiting_flag = True        
-   
+    def _setQuitWaitingFlag(self):
+        """Set the quit waiting flag to True."""
+        self.quit_waiting_flag = True
+
+    def toggleGestureMode(self):
+        """Toggle gesture control on or off."""
+        self.gesture_mode = not self.gesture_mode
+        self.gesture_buffer.clear()
+        if self.gesture_mode:
+            self.btn_gesture.config(text="Gesture Control: ON", relief="sunken")
+            print("[INFO] Gesture control ON")
+        else:
+            self.btn_gesture.config(text="Gesture Control: OFF", relief="raised")
+            print("[INFO] Gesture control OFF")
+
+    def dispatchGestureCommand(self, gesture_id):
+        # cooldown — only fire once every 2 seconds
+        now = time.time()
+        if now - self.last_gesture_time < 2.0:
+            return
+        self.last_gesture_time = now
+        self.gesture_buffer.clear()
+
+        gesture_name, command = GESTURES.get(gesture_id, ('Unknown', 'None'))
+        print(f"[GESTURE] {gesture_name} → {command}")
+        if gesture_id == 0:
+            self.tello.send_command('command')  # hover, not stop
+        elif gesture_id == 1:
+            self.telloLanding()
+        elif gesture_id == 2:
+            self.telloUp(self.distance)
+        elif gesture_id == 3:
+            self.telloDown(self.distance)
+        elif gesture_id == 4:
+            self.tello.rotate_ccw(self.degree)
+        elif gesture_id == 5:
+            self.tello.rotate_cw(self.degree)
+        elif gesture_id == 6:
+            pass  # Peace Sign -- reserved for next mode
+        elif gesture_id == 7:
+            pass  
+        elif gesture_id == 8:
+            self._toggleFollow() # Thumbs Up = toggle person following
+
+    def _toggleFollow(self):
+        """Toggle person following on or off and update the button label."""
+        active = self.person_follower.toggle()
+        if active:
+            self.btn_follow.config(text="Follow Mode: ON", relief="sunken")
+            print("[INFO] Follow mode ON — Thumbs Up again to disable")
+        else:
+            self.btn_follow.config(text="Follow Mode: OFF", relief="raised")
+            print("[INFO] Follow mode OFF")
+
     def openCmdWindow(self):
-        """
-        open the cmd window and initial all the button and text
-        """        
+        """Open the command panel window."""
         panel = Toplevel(self.root)
         panel.wm_title("Command Panel")
 
-        # create text input entry
         text0 = tki.Label(panel,
-                          text='This Controller map keyboard inputs to Tello control commands\n'
-                               'Adjust the trackbar to reset distance and degree parameter',
-                          font='Helvetica 10 bold'
-                          )
+                          text='This Controller maps keyboard inputs to Tello control commands\n'
+                               'Adjust the trackbar to reset distance and degree parameters',
+                          font='Helvetica 10 bold')
         text0.pack(side='top')
 
         text1 = tki.Label(panel, text=
@@ -149,15 +254,15 @@ class TelloUI:
                           justify="left")
         text1.pack(side="top")
 
-        self.btn_landing = tki.Button(
-            panel, text="Land", relief="raised", command=self.telloLanding)
+        self.btn_landing = tki.Button(panel, text="Land", relief="raised",
+                                      command=self.telloLanding)
         self.btn_landing.pack(side="bottom", fill="both",
-                              expand="yes", padx=10, pady=5)
+                              expand=True, padx=10, pady=5)
 
-        self.btn_takeoff = tki.Button(
-            panel, text="Takeoff", relief="raised", command=self.telloTakeOff)
+        self.btn_takeoff = tki.Button(panel, text="Takeoff", relief="raised",
+                                      command=self.telloTakeOff)
         self.btn_takeoff.pack(side="bottom", fill="both",
-                              expand="yes", padx=10, pady=5)
+                              expand=True, padx=10, pady=5)
 
         # binding arrow keys to drone control
         self.tmp_f = tki.Frame(panel, width=100, height=2)
@@ -172,78 +277,68 @@ class TelloUI:
         self.tmp_f.pack(side="bottom")
         self.tmp_f.focus_set()
 
-        self.btn_landing = tki.Button(
-            panel, text="Flip", relief="raised", command=self.openFlipWindow)
-        self.btn_landing.pack(side="bottom", fill="both",
-                              expand="yes", padx=10, pady=5)
+        self.btn_flip = tki.Button(panel, text="Flip", relief="raised",
+                                   command=self.openFlipWindow)
+        self.btn_flip.pack(side="bottom", fill="both",
+                           expand=True, padx=10, pady=5)
 
-        self.distance_bar = Scale(panel, from_=0.02, to=5, tickinterval=0.01, digits=3, label='Distance(m)',
-                                  resolution=0.01)
+        self.distance_bar = Scale(panel, from_=0.02, to=5, tickinterval=0.01,
+                                  digits=3, label='Distance(m)', resolution=0.01)
         self.distance_bar.set(0.2)
         self.distance_bar.pack(side="left")
 
         self.btn_distance = tki.Button(panel, text="Reset Distance", relief="raised",
-                                       command=self.updateDistancebar,
-                                       )
+                                       command=self.updateDistancebar)
         self.btn_distance.pack(side="left", fill="both",
-                               expand="yes", padx=10, pady=5)
+                               expand=True, padx=10, pady=5)
 
         self.degree_bar = Scale(panel, from_=1, to=360, tickinterval=10, label='Degree')
         self.degree_bar.set(30)
         self.degree_bar.pack(side="right")
 
-        self.btn_distance = tki.Button(panel, text="Reset Degree", relief="raised", command=self.updateDegreebar)
-        self.btn_distance.pack(side="right", fill="both",
-                               expand="yes", padx=10, pady=5)
+        self.btn_degree = tki.Button(panel, text="Reset Degree", relief="raised",
+                                     command=self.updateDegreebar)
+        self.btn_degree.pack(side="right", fill="both",
+                             expand=True, padx=10, pady=5)
 
     def openFlipWindow(self):
-        """
-        open the flip window and initial all the button and text
-        """
-        
+        """Open the flip command window."""
         panel = Toplevel(self.root)
-        panel.wm_title("Gesture Recognition")
+        panel.wm_title("Flip")
 
-        self.btn_flipl = tki.Button(
-            panel, text="Flip Left", relief="raised", command=self.telloFlip_l)
+        self.btn_flipl = tki.Button(panel, text="Flip Left", relief="raised",
+                                    command=self.telloFlip_l)
         self.btn_flipl.pack(side="bottom", fill="both",
-                            expand="yes", padx=10, pady=5)
+                            expand=True, padx=10, pady=5)
 
-        self.btn_flipr = tki.Button(
-            panel, text="Flip Right", relief="raised", command=self.telloFlip_r)
+        self.btn_flipr = tki.Button(panel, text="Flip Right", relief="raised",
+                                    command=self.telloFlip_r)
         self.btn_flipr.pack(side="bottom", fill="both",
-                            expand="yes", padx=10, pady=5)
+                            expand=True, padx=10, pady=5)
 
-        self.btn_flipf = tki.Button(
-            panel, text="Flip Forward", relief="raised", command=self.telloFlip_f)
+        self.btn_flipf = tki.Button(panel, text="Flip Forward", relief="raised",
+                                    command=self.telloFlip_f)
         self.btn_flipf.pack(side="bottom", fill="both",
-                            expand="yes", padx=10, pady=5)
+                            expand=True, padx=10, pady=5)
 
-        self.btn_flipb = tki.Button(
-            panel, text="Flip Backward", relief="raised", command=self.telloFlip_b)
+        self.btn_flipb = tki.Button(panel, text="Flip Backward", relief="raised",
+                                    command=self.telloFlip_b)
         self.btn_flipb.pack(side="bottom", fill="both",
-                            expand="yes", padx=10, pady=5)
-       
-    def takeSnapshot(self):
-        """
-        save the current frame of the video as a jpg file and put it into outputpath
-        """
+                            expand=True, padx=10, pady=5)
 
-        # grab the current timestamp and use it to construct the filename
+    def takeSnapshot(self):
+        """Save the current frame as a jpg file."""
+        if self.frame is None:
+            print("[WARN] No frame available yet")
+            return
         ts = datetime.datetime.now()
         filename = "{}.jpg".format(ts.strftime("%Y-%m-%d_%H-%M-%S"))
-
         p = os.path.sep.join((self.outputPath, filename))
-
-        # save the file
-        cv2.imwrite(p, cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(p, self.frame)  # self.frame is already BGR
         print("[INFO] saved {}".format(filename))
 
-
     def pauseVideo(self):
-        """
-        Toggle the freeze/unfreze of video
-        """
+        """Toggle freeze/unfreeze of video."""
         if self.btn_pause.config('relief')[-1] == 'sunken':
             self.btn_pause.config(relief="raised")
             self.tello.video_freeze(False)
@@ -252,7 +347,7 @@ class TelloUI:
             self.tello.video_freeze(True)
 
     def telloTakeOff(self):
-        return self.tello.takeoff()                
+        return self.tello.takeoff()
 
     def telloLanding(self):
         return self.tello.land()
@@ -293,9 +388,6 @@ class TelloUI:
     def telloDown(self, dist):
         return self.tello.move_down(dist)
 
-    def updateTrackBar(self):
-        self.my_tello_hand.setThr(self.hand_thr_bar.get())
-
     def updateDistancebar(self):
         try:
             self.distance = self.distance_bar.get()
@@ -323,7 +415,7 @@ class TelloUI:
         self.tello.rotate_ccw(self.degree)
 
     def on_keypress_d(self, event):
-        print("cw %d m" % self.degree)
+        print("cw %d degree" % self.degree)
         self.tello.rotate_cw(self.degree)
 
     def on_keypress_up(self, event):
@@ -343,18 +435,16 @@ class TelloUI:
         self.telloMoveRight(self.distance)
 
     def on_keypress_enter(self, event):
-        if self.frame is not None:
-            self.registerFace()
         self.tmp_f.focus_set()
 
     def onClose(self):
-        """
-        set the stop event, cleanup the camera, and allow the rest of
-        
-        the quit process to continue
-        """
+        """Set the stop event and clean up on window close."""
         print("[INFO] closing...")
         self.stopEvent.set()
+        self.person_follower.close()  # zero RC and release pose resources
+        self.hands.close()
+        # call close() if available (simulator)
+        if hasattr(self.tello, 'close'):
+            self.tello.close()
         del self.tello
         self.root.quit()
-

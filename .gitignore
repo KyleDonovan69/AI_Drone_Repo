@@ -1,0 +1,5 @@
+# in repo root
+echo "venv/" >> .gitignore
+echo "__pycache__/" >> .gitignore
+echo "*.pyc" >> .gitignore
+echo "*.pkl" >> .gitignore

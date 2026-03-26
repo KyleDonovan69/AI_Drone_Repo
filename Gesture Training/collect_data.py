@@ -4,9 +4,9 @@ import csv
 import os
 
 # setup
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils # type: ignore[attr-defined]
+mp_drawing_styles = mp.solutions.drawing_styles # type: ignore[attr-defined]
+mp_hands = mp.solutions.hands # type: ignore[attr-defined]
 
 # gesture labels — key maps to (gesture name, drone command)
 GESTURES = {
@@ -16,9 +16,11 @@ GESTURES = {
     '3': ('Point Down',  'Move Down'),
     '4': ('Point Left',  'Rotate Left'),
     '5': ('Point Right', 'Rotate Right'),
+    '6': ('Peace Sign',  'Next Mode'),
+    '7': ('Thumbs Up',   'Confirm Mode'),
 }
 
-# make sure data folder exist
+# make sure data folder exists
 os.makedirs('data', exist_ok=True)
 CSV_PATH = 'data/keypoints.csv'
 

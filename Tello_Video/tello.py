@@ -157,6 +157,25 @@ class Tello:
         self.response = None
 
         return response
+
+    def send_rc_control(self, left_right, forward_backward, up_down, yaw):
+        """
+        Send a continuous RC control packet (no response expected).
+
+        Used by PersonFollower for smooth real-time movement.
+        All values must be in the range -100 to 100.
+
+        :param left_right (int):        Lateral velocity  (+right / -left).
+        :param forward_backward (int):  Longitudinal velocity (+forward / -backward).
+        :param up_down (int):           Vertical velocity  (+up / -down).
+        :param yaw (int):               Yaw rate           (+clockwise / -counter-clockwise).
+        """
+        lr  = int(np.clip(left_right,       -100, 100))
+        fb  = int(np.clip(forward_backward, -100, 100))
+        ud  = int(np.clip(up_down,          -100, 100))
+        yw  = int(np.clip(yaw,              -100, 100))
+        cmd = 'rc %s %s %s %s' % (lr, fb, ud, yw)
+        self.socket.sendto(cmd.encode('utf-8'), self.tello_address)
     
     def set_abort_flag(self):
         """
@@ -269,7 +288,7 @@ class Tello:
         """
         height = self.send_command('height?')
         height = str(height)
-        height = filter(str.isdigit, height)
+        height = ''.join(filter(str.isdigit, height))  # filter() returns an iterator in Python 3 -- join to string first
         try:
             height = int(height)
             self.last_height = height

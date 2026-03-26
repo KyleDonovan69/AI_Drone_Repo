@@ -1,0 +1,11 @@
+{
+  "include": [
+    "Tello_Video",
+    "Gesture Training"
+  ],
+  "extraPaths": [
+    "Tello_Video"
+  ],
+  "venvPath": ".",
+  "venv": "venv"
+}
