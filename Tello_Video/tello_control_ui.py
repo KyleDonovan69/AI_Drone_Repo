@@ -14,9 +14,9 @@ from collections import deque
 from person_follower import PersonFollower
 
 # mediapipe setup
-mp_drawing = mp.solutions.drawing_utils # type: ignore[attr-defined]
-mp_drawing_styles = mp.solutions.drawing_styles # type: ignore[attr-defined]
-mp_hands = mp.solutions.hands # type: ignore[attr-defined]
+mp_drawing = mp.solutions.drawing_utils          # type: ignore[attr-defined]
+mp_drawing_styles = mp.solutions.drawing_styles  # type: ignore[attr-defined]
+mp_hands = mp.solutions.hands                    # type: ignore[attr-defined]
 
 # gesture labels
 GESTURES = {
@@ -27,7 +27,20 @@ GESTURES = {
     4: ('Point Left',  'Rotate Left'),
     5: ('Point Right', 'Rotate Right'),
     6: ('Peace Sign',  'Next Mode'),
-    7: ('Thumbs Up',   'Toggle Follow'),  # activates/deactivates person following
+    7: ('Thumbs Up',   'Confirm Mode'),
+}
+
+# mode names
+MODES = {
+    0: 'Manual',
+    1: 'Gesture Control',
+    2: 'Hunt Mode',
+}
+
+MODE_INDICATORS = {
+    0: '[MANUAL]',
+    1: '[GESTURE]',
+    2: '[HUNT]',
 }
 
 
@@ -53,6 +66,10 @@ class TelloUI:
 
         self.quit_waiting_flag = False
 
+        # mode system — 0: Manual, 1: Gesture Control, 2: Hunt Mode
+        self.current_mode = 0
+        self.pending_mode = None
+
         # gesture control setup
         self.gesture_mode = False
         self.gesture_buffer = deque(maxlen=15)
@@ -66,13 +83,23 @@ class TelloUI:
             min_tracking_confidence=0.7)
         print("[INFO] Gesture model loaded")
 
-        # person follower setup -- activated with thumbs up gesture
+        # person follower setup -- activated when Hunt Mode is confirmed
         self.person_follower = PersonFollower(tello)
         print("[INFO] Person follower initialised")
 
         # initialize the root window and image panel
         self.root = tki.Tk()
         self.panel = None
+
+        # mode display label at the top
+        self.mode_label = tki.Label(
+            self.root,
+            text="Mode: [MANUAL] Manual",
+            font='Helvetica 14 bold',
+            fg='white',
+            bg='black'
+        )
+        self.mode_label.pack(side="top", fill="both", padx=10, pady=5)
 
         # create buttons
         self.btn_snapshot = tki.Button(self.root, text="Snapshot!",
@@ -96,7 +123,7 @@ class TelloUI:
         self.btn_gesture.pack(side="bottom", fill="both",
                               expand=True, padx=10, pady=5)
 
-        # follow mode toggle button -- also toggled by Thumbs Up gesture
+        # follow mode toggle button -- also activated when Hunt Mode is confirmed
         self.btn_follow = tki.Button(self.root, text="Follow Mode: OFF",
                                      relief="raised", command=self._toggleFollow)
         self.btn_follow.pack(side="bottom", fill="both",
@@ -185,6 +212,39 @@ class TelloUI:
         """Set the quit waiting flag to True."""
         self.quit_waiting_flag = True
 
+    def updateModeLabel(self):
+        """Update the mode label with text indicator."""
+        self.mode_label.config(
+            text=f"Mode: {MODE_INDICATORS[self.current_mode]} {MODES[self.current_mode]}",
+            bg='black',
+            fg='white'
+        )
+        print(f"[MODE] Switched to {MODES[self.current_mode]}")
+
+    def cycleMode(self):
+        """Peace sign -- select next mode, wait for thumbs up to confirm."""
+        self.pending_mode = (self.current_mode + 1) % len(MODES)
+        self.mode_label.config(
+            text=f"[PENDING] {MODES[self.pending_mode]} - Thumbs Up to confirm",
+            bg='black',
+            fg='orange'
+        )
+        print(f"[MODE] Pending: {MODES[self.pending_mode]} - show Thumbs Up to confirm")
+
+    def confirmMode(self):
+        """Thumbs up -- confirm the pending mode and apply any mode effects."""
+        if self.pending_mode is not None:
+            self.current_mode = self.pending_mode
+            self.pending_mode = None
+            self.updateModeLabel()
+            # Hunt Mode activates person following, all other modes disable it
+            if self.current_mode == 2:
+                self._setFollow(True)
+            else:
+                self._setFollow(False)
+        else:
+            print("[MODE] No pending mode to confirm")
+
     def toggleGestureMode(self):
         """Toggle gesture control on or off."""
         self.gesture_mode = not self.gesture_mode
@@ -206,6 +266,20 @@ class TelloUI:
 
         gesture_name, command = GESTURES.get(gesture_id, ('Unknown', 'None'))
         print(f"[GESTURE] {gesture_name} → {command}")
+
+        # mode switching — always active regardless of current mode
+        if gesture_id == 6:
+            self.cycleMode()
+            return
+        elif gesture_id == 7:
+            self.confirmMode()
+            return
+
+        # drone commands — only active in Gesture Control mode (mode 1)
+        if self.current_mode != 1:
+            print("[GESTURE] Ignored - not in Gesture Control mode")
+            return
+
         if gesture_id == 0:
             self.tello.send_command('command')  # hover, not stop
         elif gesture_id == 1:
@@ -218,12 +292,17 @@ class TelloUI:
             self.tello.rotate_ccw(self.degree)
         elif gesture_id == 5:
             self.tello.rotate_cw(self.degree)
-        elif gesture_id == 6:
-            pass  # Peace Sign -- reserved for next mode
-        elif gesture_id == 7:
-            pass  
-        elif gesture_id == 8:
-            self._toggleFollow() # Thumbs Up = toggle person following
+
+    def _setFollow(self, active):
+        """Set follow mode to a specific state and update the button label."""
+        if active != self.person_follower.active:
+            self.person_follower.toggle()
+        if active:
+            self.btn_follow.config(text="Follow Mode: ON", relief="sunken")
+            print("[INFO] Follow mode ON")
+        else:
+            self.btn_follow.config(text="Follow Mode: OFF", relief="raised")
+            print("[INFO] Follow mode OFF")
 
     def _toggleFollow(self):
         """Toggle person following on or off and update the button label."""
@@ -334,7 +413,7 @@ class TelloUI:
         ts = datetime.datetime.now()
         filename = "{}.jpg".format(ts.strftime("%Y-%m-%d_%H-%M-%S"))
         p = os.path.sep.join((self.outputPath, filename))
-        cv2.imwrite(p, self.frame)  # self.frame is already BGR
+        cv2.imwrite(p, self.frame)  # self.frame is already BGR -- write directly
         print("[INFO] saved {}".format(filename))
 
     def pauseVideo(self):
@@ -435,6 +514,7 @@ class TelloUI:
         self.telloMoveRight(self.distance)
 
     def on_keypress_enter(self, event):
+        # registerFace was removed -- no face registration in this version
         self.tmp_f.focus_set()
 
     def onClose(self):
@@ -443,7 +523,7 @@ class TelloUI:
         self.stopEvent.set()
         self.person_follower.close()  # zero RC and release pose resources
         self.hands.close()
-        # call close() if available (simulator)
+        # call close() if available (simulator), otherwise just delete
         if hasattr(self.tello, 'close'):
             self.tello.close()
         del self.tello
