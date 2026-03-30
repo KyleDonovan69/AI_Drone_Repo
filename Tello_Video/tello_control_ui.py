@@ -12,6 +12,7 @@ import pickle
 from collections import deque
 
 from person_follower import PersonFollower
+from hunt_mode import HuntMode
 
 # mediapipe setup
 mp_drawing = mp.solutions.drawing_utils          # type: ignore[attr-defined]
@@ -34,13 +35,15 @@ GESTURES = {
 MODES = {
     0: 'Manual',
     1: 'Gesture Control',
-    2: 'Hunt Mode',
+    2: 'Follow Mode',
+    3: 'Hunt Mode',
 }
 
 MODE_INDICATORS = {
     0: '[MANUAL]',
     1: '[GESTURE]',
-    2: '[HUNT]',
+    2: '[FOLLOW]',
+    3: '[HUNT]',
 }
 
 
@@ -66,7 +69,7 @@ class TelloUI:
 
         self.quit_waiting_flag = False
 
-        # mode system — 0: Manual, 1: Gesture Control, 2: Hunt Mode
+        # mode system — 0: Manual, 1: Gesture Control, 2: Follow Mode, 3: Hunt Mode
         self.current_mode = 0
         self.pending_mode = None
 
@@ -83,9 +86,13 @@ class TelloUI:
             min_tracking_confidence=0.7)
         print("[INFO] Gesture model loaded")
 
-        # person follower setup -- activated when Hunt Mode is confirmed
+        # person follower — activated when Follow Mode is confirmed
         self.person_follower = PersonFollower(tello)
         print("[INFO] Person follower initialised")
+
+        # hunt mode — activated when Hunt Mode is confirmed
+        self.hunt_mode = HuntMode(tello)
+        print("[INFO] Hunt mode initialised")
 
         # initialize the root window and image panel
         self.root = tki.Tk()
@@ -123,11 +130,17 @@ class TelloUI:
         self.btn_gesture.pack(side="bottom", fill="both",
                               expand=True, padx=10, pady=5)
 
-        # follow mode toggle button -- also activated when Hunt Mode is confirmed
+        # follow mode toggle button — activated when Follow Mode is confirmed
         self.btn_follow = tki.Button(self.root, text="Follow Mode: OFF",
                                      relief="raised", command=self._toggleFollow)
         self.btn_follow.pack(side="bottom", fill="both",
                              expand=True, padx=10, pady=5)
+
+        # hunt mode toggle button — activated when Hunt Mode is confirmed
+        self.btn_hunt = tki.Button(self.root, text="Hunt Mode: OFF",
+                                   relief="raised", command=self._toggleHunt)
+        self.btn_hunt.pack(side="bottom", fill="both",
+                           expand=True, padx=10, pady=5)
 
         # start video loop thread
         self.stopEvent = threading.Event()
@@ -179,8 +192,11 @@ class TelloUI:
                         self.gesture_buffer.clear()
                 # --- end gesture recognition ---
 
-                # run pose detection and RC control for person following
+                # run person following (mode 2)
                 display_frame = self.person_follower.process_frame(display_frame)
+
+                # run hunt mode (mode 3)
+                display_frame = self.hunt_mode.process_frame(display_frame)
 
                 # convert BGR to RGB before passing to PIL -- drone frames are BGR
                 image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
@@ -222,8 +238,8 @@ class TelloUI:
         print(f"[MODE] Switched to {MODES[self.current_mode]}")
 
     def cycleMode(self):
-        """Peace sign -- select next mode, wait for thumbs up to confirm."""
-        self.pending_mode = (self.current_mode + 1) % len(MODES)
+        base = self.pending_mode if self.pending_mode is not None else self.current_mode
+        self.pending_mode = (base + 1) % len(MODES)
         self.mode_label.config(
             text=f"[PENDING] {MODES[self.pending_mode]} - Thumbs Up to confirm",
             bg='black',
@@ -237,11 +253,19 @@ class TelloUI:
             self.current_mode = self.pending_mode
             self.pending_mode = None
             self.updateModeLabel()
-            # Hunt Mode activates person following, all other modes disable it
+
+            # Mode 2: Follow — person following ON, hunt OFF
             if self.current_mode == 2:
                 self._setFollow(True)
+                self._setHunt(False)
+            # Mode 3: Hunt — hunt ON, person following OFF
+            elif self.current_mode == 3:
+                self._setHunt(True)
+                self._setFollow(False)
+            # Any other mode — disable both
             else:
                 self._setFollow(False)
+                self._setHunt(False)
         else:
             print("[MODE] No pending mode to confirm")
 
@@ -293,6 +317,8 @@ class TelloUI:
         elif gesture_id == 5:
             self.tello.rotate_cw(self.degree)
 
+    # ── Follow mode helpers ───────────────────────────────────────────────────
+
     def _setFollow(self, active):
         """Set follow mode to a specific state and update the button label."""
         if active != self.person_follower.active:
@@ -307,12 +333,41 @@ class TelloUI:
     def _toggleFollow(self):
         """Toggle person following on or off and update the button label."""
         active = self.person_follower.toggle()
+        # if we're manually toggling follow, turn off hunt to avoid conflicts
         if active:
+            self._setHunt(False)
             self.btn_follow.config(text="Follow Mode: ON", relief="sunken")
-            print("[INFO] Follow mode ON — Thumbs Up again to disable")
+            print("[INFO] Follow mode ON")
         else:
             self.btn_follow.config(text="Follow Mode: OFF", relief="raised")
             print("[INFO] Follow mode OFF")
+
+    # ── Hunt mode helpers ─────────────────────────────────────────────────────
+
+    def _setHunt(self, active):
+        """Set hunt mode to a specific state and update the button label."""
+        if active != self.hunt_mode.active:
+            self.hunt_mode.toggle()
+        if active:
+            self.btn_hunt.config(text="Hunt Mode: ON", relief="sunken")
+            print("[INFO] Hunt mode ON")
+        else:
+            self.btn_hunt.config(text="Hunt Mode: OFF", relief="raised")
+            print("[INFO] Hunt mode OFF")
+
+    def _toggleHunt(self):
+        """Toggle hunt mode on or off and update the button label."""
+        active = self.hunt_mode.toggle()
+        # if we're manually toggling hunt, turn off follow to avoid conflicts
+        if active:
+            self._setFollow(False)
+            self.btn_hunt.config(text="Hunt Mode: ON", relief="sunken")
+            print("[INFO] Hunt mode ON")
+        else:
+            self.btn_hunt.config(text="Hunt Mode: OFF", relief="raised")
+            print("[INFO] Hunt mode OFF")
+
+    # ── Command panel ─────────────────────────────────────────────────────────
 
     def openCmdWindow(self):
         """Open the command panel window."""
@@ -514,16 +569,15 @@ class TelloUI:
         self.telloMoveRight(self.distance)
 
     def on_keypress_enter(self, event):
-        # registerFace was removed -- no face registration in this version
         self.tmp_f.focus_set()
 
     def onClose(self):
         """Set the stop event and clean up on window close."""
         print("[INFO] closing...")
         self.stopEvent.set()
-        self.person_follower.close()  # zero RC and release pose resources
+        self.person_follower.close()
+        self.hunt_mode.close()
         self.hands.close()
-        # call close() if available (simulator), otherwise just delete
         if hasattr(self.tello, 'close'):
             self.tello.close()
         del self.tello

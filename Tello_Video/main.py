@@ -9,7 +9,7 @@ from tello_control_ui import TelloUI
 # ── Simulator toggle ──────────────────────────────────────────────────────────
 # Set USE_SIMULATOR = True to Use the drone sim since I'm not buying a 300 euro drone
 # Set USE_SIMULATOR = False when connected to the real Tello drone
-USE_SIMULATOR = False
+USE_SIMULATOR = True
 
 if USE_SIMULATOR:
     import tello_sim as tello

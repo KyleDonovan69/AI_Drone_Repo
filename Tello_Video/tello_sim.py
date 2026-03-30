@@ -169,26 +169,14 @@ class Tello:
         return 'ok'
 
     def send_rc_control(self, left_right, forward_backward, up_down, yaw):
-        """
-        Store RC values and print them when any axis is non-zero.
+        self._rc_lr  = int(np.clip(left_right,       -100, 100))
+        self._rc_fb  = int(np.clip(forward_backward, -100, 100))
+        self._rc_ud  = int(np.clip(up_down,          -100, 100))
+        self._rc_yaw = int(np.clip(yaw,              -100, 100))
 
-        All values must be in the range -100 to 100.
-
-        :param left_right (int):        Lateral velocity  (+right / -left).
-        :param forward_backward (int):  Longitudinal velocity (+forward / -backward).
-        :param up_down (int):           Vertical velocity  (+up / -down).
-        :param yaw (int):               Yaw rate           (+clockwise / -counter-clockwise).
-        """
-        self._rc_lr  = int(left_right)
-        self._rc_fb  = int(forward_backward)
-        self._rc_ud  = int(up_down)
-        self._rc_yaw = int(yaw)
-
-        # only print when there's actual movement to avoid log spam
         if any([left_right, forward_backward, up_down, yaw]):
-            print(f"[SIM] rc  lr={left_right:+4d}  fb={forward_backward:+4d}  "
-                  f"ud={up_down:+4d}  yaw={yaw:+4d}")
-
+            print(f"[SIM] rc  lr={self._rc_lr:+4d}  fb={self._rc_fb:+4d}  "
+                f"ud={self._rc_ud:+4d}  yaw={self._rc_yaw:+4d}")
     # ── Flight commands ───────────────────────────────────────────────────
 
     def takeoff(self):
