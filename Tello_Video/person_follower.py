@@ -21,11 +21,11 @@ class PersonFollower:
 
     # ── RC speed limits (Tello accepts -100 to 100) ─────────────────────
     MAX_YAW: int = 30
-    MAX_UD: int = 25
+    MAX_UD: int = 10
     MAX_FB: int = 25
 
     # ── Dead-bands (normalised 0–1) — ignore tiny errors to avoid jitter ─
-    DEAD_ZONE: float = 0.10
+    DEAD_ZONE: float = 0.0
     SIZE_DEAD_ZONE: float = 0.07
 
     # ── Target apparent size (shoulder-to-hip height as fraction of frame) ─
@@ -48,13 +48,13 @@ class PersonFollower:
         self.active: bool = False
         self._last_cmd_time: float = 0.0
 
-        self._pose = mp.solutions.pose.Pose(
+        self._pose = mp.solutions.pose.Pose(  # type: ignore[attr-defined]
             model_complexity=0,              # lightest model — best for real-time
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        self._draw_utils = mp.solutions.drawing_utils
-        self._pose_connections = mp.solutions.pose.POSE_CONNECTIONS
+        self._draw_utils = mp.solutions.drawing_utils  # type: ignore[attr-defined]
+        self._pose_connections = mp.solutions.pose.POSE_CONNECTIONS  # type: ignore[attr-defined]
 
     # ── Public interface ─────────────────────────────────────────────────
 

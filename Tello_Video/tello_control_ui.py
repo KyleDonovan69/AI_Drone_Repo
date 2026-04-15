@@ -7,6 +7,7 @@ import datetime
 import cv2
 import os
 import time
+import queue
 import mediapipe as mp
 import pickle
 from collections import deque
@@ -144,6 +145,15 @@ class TelloUI:
 
         # start video loop thread
         self.stopEvent = threading.Event()
+
+        # frame queue: _frameGrabLoop puts the latest frame here; videoLoop reads it.
+        # maxsize=1 means the grabber always overwrites with the freshest frame so
+        # AI processing never blocks behind a stale one.
+        self._frame_queue = queue.Queue(maxsize=1)
+
+        self._grab_thread = threading.Thread(target=self._frameGrabLoop, daemon=True)
+        self._grab_thread.start()
+
         self.thread = threading.Thread(target=self.videoLoop, args=())
         self.thread.start()
 
@@ -153,6 +163,24 @@ class TelloUI:
 
         # sending_command sends 'command' to tello every 5 seconds to keep connection alive
         self.sending_command_thread = threading.Thread(target=self._sendingCommand)
+
+    def _frameGrabLoop(self):
+        """Dedicated thread: reads the latest camera frame and pushes it into
+        _frame_queue at roughly camera frame-rate.  Using a queue of maxsize=1
+        means the consumer (videoLoop) always gets the most recently captured
+        frame rather than one that was grabbed several AI-inference cycles ago.
+        """
+        while not self.stopEvent.is_set():
+            frame = self.tello.read()
+            if frame is not None and frame.size > 0:
+                # drain the stale frame (if any) before pushing the new one so
+                # the queue never blocks the grabber on a slow AI cycle.
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._frame_queue.put_nowait(frame)
+            time.sleep(0.005)  # ~200 Hz polling — fast enough to stay ahead of 30 fps camera
 
     def videoLoop(self):
         """
@@ -165,9 +193,10 @@ class TelloUI:
             self.sending_command_thread.start()
 
             while not self.stopEvent.is_set():
-                self.frame = self.tello.read()
-
-                if self.frame is None or self.frame.size == 0:
+                # Block until a frame is available (timeout avoids hanging on shutdown).
+                try:
+                    self.frame = self._frame_queue.get(timeout=0.1)
+                except queue.Empty:
                     continue
 
                 display_frame = self.frame.copy()
@@ -201,7 +230,8 @@ class TelloUI:
                 # convert BGR to RGB before passing to PIL -- drone frames are BGR
                 image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                 self.root.after(0, self._updateGUIImage, image)
-                time.sleep(0.03)
+                # No fixed sleep here — the queue.get() above blocks when no new
+                # frame is ready, so the loop naturally runs at camera frame-rate.
 
         except RuntimeError as e:
             print("[INFO] caught a RuntimeError")

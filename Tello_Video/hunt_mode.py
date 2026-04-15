@@ -19,8 +19,8 @@ _CLOSE_AREA    = 0.10   # target occupies ≥10 % of frame area → "close enoug
 
 # RC magnitudes
 _YAW_SPEED    = 30   # left/right rotation to centre target
-_UD_SPEED     = 20   # up/down to keep target vertically centred
-_FB_SPEED     = 25   # forward speed when target is centred but far
+_UD_SPEED     = 15   # up/down to keep target vertically centred
+_FB_SPEED     = 15   # forward speed when target is centred but far
 _SEARCH_YAW   = 28   # slow clockwise spin when searching
 
 # How often (seconds) to emit an RC command while searching

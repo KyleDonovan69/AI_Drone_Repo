@@ -3,6 +3,7 @@ import threading
 import time
 import numpy as np
 import av
+import queue
 
 class Tello:
     """Wrapper class to interact with the Tello drone."""
@@ -25,8 +26,12 @@ class Tello:
         self.codec = av.CodecContext.create('h264', 'r')
         self.command_timeout = command_timeout
         self.imperial = imperial
-        self.response = None  
+        self.response = None
         self.frame = None  # numpy array BGR -- current camera output frame
+
+        # thread-safe response signalling (replaces busy-poll)
+        self._response_event = threading.Event()
+        self._response_lock = threading.Lock()
         self.is_freeze = False  # freeze current camera output
         self.last_frame = None
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # socket for sending cmd
@@ -83,8 +88,10 @@ class Tello:
         """
         while True:
             try:
-                self.response, ip = self.socket.recvfrom(3000)
-                #print(self.response)
+                data, ip = self.socket.recvfrom(3000)
+                with self._response_lock:
+                    self.response = data
+                self._response_event.set()
             except socket.error as exc:
                 print ("Caught exception socket.error : %s" % exc)
 
@@ -138,23 +145,20 @@ class Tello:
         """
 
         print (">> send cmd: {}".format(command))
-        self.abort_flag = False
-        timer = threading.Timer(self.command_timeout, self.set_abort_flag)
+        self._response_event.clear()
+        with self._response_lock:
+            self.response = None
 
         self.socket.sendto(command.encode('utf-8'), self.tello_address)
 
-        timer.start()
-        while self.response is None:
-            if self.abort_flag is True:
-                break
-        timer.cancel()
-        
-        if self.response is None:
-            response = 'none_response'
-        else:
-            response = self.response.decode('utf-8')
+        got_response = self._response_event.wait(timeout=self.command_timeout)
 
-        self.response = None
+        with self._response_lock:
+            if not got_response or self.response is None:
+                response = 'none_response'
+            else:
+                response = self.response.decode('utf-8')
+            self.response = None
 
         return response
 
@@ -177,18 +181,6 @@ class Tello:
         cmd = 'rc %s %s %s %s' % (lr, fb, ud, yw)
         self.socket.sendto(cmd.encode('utf-8'), self.tello_address)
     
-    def set_abort_flag(self):
-        """
-        Sets self.abort_flag to True.
-
-        Used by the timer in Tello.send_command() to indicate to that a response
-        
-        timeout has occurred.
-
-        """
-
-        self.abort_flag = True
-
     def takeoff(self):
         """
         Initiates take-off.
