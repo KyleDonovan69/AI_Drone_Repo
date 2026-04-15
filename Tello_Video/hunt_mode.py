@@ -2,91 +2,119 @@ import cv2
 import numpy as np
 import time
 
-
 # ── Tunable constants ─────────────────────────────────────────────────────────
 
-# Monster-green HSV range  (tweak if detection is off under your lighting)
-_HSV_LO = np.array([35,  80, 80],  dtype=np.uint8)
+_HSV_LO = np.array([35,  60, 60],  dtype=np.uint8)   # looser for stage 1
 _HSV_HI = np.array([85, 255, 255], dtype=np.uint8)
 
-# Minimum contour area (px²) to count as a real detection, not noise
-_MIN_AREA = 1_200
+# Strict range for confirmation (stage 2)
+_HSV_STRICT_LO = np.array([40,  100, 100], dtype=np.uint8)
+_HSV_STRICT_HI = np.array([75,  255, 255], dtype=np.uint8)
 
-# Frame fractions used for dead-zone logic
-_CENTRE_DEAD_X = 0.18   # ±18 % of frame width  → no yaw correction
-_CENTRE_DEAD_Y = 0.18   # ±18 % of frame height → no up/down correction
-_CLOSE_AREA    = 0.10   # target occupies ≥10 % of frame area → "close enough"
+_MIN_AREA       = 1_200
+_CENTRE_DEAD_X  = 0.18
+_CENTRE_DEAD_Y  = 0.18
+_CLOSE_AREA     = 0.10
+_CONFIRM_RATIO  = 0.45   # 45% of bounding box must be strict-green to confirm
 
-# RC magnitudes
-_YAW_SPEED    = 30   # left/right rotation to centre target
-_UD_SPEED     = 15   # up/down to keep target vertically centred
-_FB_SPEED     = 15   # forward speed when target is centred but far
-_SEARCH_YAW   = 28   # slow clockwise spin when searching
+_YAW_SPEED   = 30
+_UD_SPEED    = 15
+_FB_SPEED    = 15
+_BACK_SPEED  = 20        # reverse speed during failed confirmation
+_SEARCH_YAW  = 28
+_SEARCH_TICK = 0.30
 
-# How often (seconds) to emit an RC command while searching
-_SEARCH_TICK  = 0.30
+_CONFIRM_TIME = 1.0      # seconds to hold position and check before deciding
+_BACKOFF_TIME = 1.0      # seconds to back away after failed confirmation
 
 
 class HuntMode:
-    """
-    Hunt a Monster can.
-
-    Uses HSV colour masking to find the can's neon-green in the camera frame,
-    then steers the drone toward it.  When nothing is visible the drone
-    rotates slowly to search.
-
-    Interface mirrors PersonFollower so TelloUI can treat both identically.
-    """
-
     def __init__(self, tello):
         self.tello  = tello
         self.active = False
 
-        self._last_tick  = 0.0   # time of last RC send
-        self._searching  = False # True while no target visible
+        self._last_tick   = 0.0
+        self._searching   = False
+        self._confirming  = False
+        self._backing_off = False
 
-        # debug: drawn on frame so you can see what the detector sees
-        self._debug_mask = False
+        self._confirm_start  = 0.0
+        self._backoff_start  = 0.0
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def toggle(self) -> bool:
-        """Toggle hunt mode on/off.  Returns the new active state."""
         self.active = not self.active
         if not self.active:
             self._stop_rc()
-            self._searching = False
+            self._reset_states()
         else:
             print("[HUNT] Hunt mode ON — looking for Monster can")
         return self.active
 
     def close(self):
-        """Zero RC outputs and release any resources."""
         if self.active:
             self._stop_rc()
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Detect the Monster can in *frame*, steer the drone, and return the
-        annotated frame.  Call every video frame whether active or not.
-        """
         if not self.active:
             return frame
 
         h, w = frame.shape[:2]
-        cx, cy, area = self._detect(frame, w, h)
+
+        # ── Backing off after failed confirmation ────────────────────────────
+        if self._backing_off:
+            if time.time() - self._backoff_start >= _BACKOFF_TIME:
+                self._backing_off = False
+                self._searching   = True
+                self._stop_rc()
+            else:
+                self.tello.send_rc_control(0, -_BACK_SPEED, 0, 0)
+                self._draw_status(frame, w, h, "[HUNT] Not the can — backing off", (0, 0, 255))
+            return frame
+
+        cx, cy, area = self._detect(frame, w, h, strict=False)
 
         if cx is None:
-            # ── No target visible — search by rotating ──────────────────────
-            self._searching = True
+            # ── Nothing visible — search ─────────────────────────────────────
+            self._confirming = False
+            self._searching  = True
             now = time.time()
             if now - self._last_tick >= _SEARCH_TICK:
                 self.tello.send_rc_control(0, 0, 0, _SEARCH_YAW)
                 self._last_tick = now
             self._draw_searching(frame, w, h)
+
+        elif area >= _CLOSE_AREA:
+            # ── Close enough — run confirmation check ────────────────────────
+            if not self._confirming:
+                self._confirming     = True
+                self._confirm_start  = time.time()
+                self._stop_rc()
+
+            elapsed = time.time() - self._confirm_start
+
+            if elapsed >= _CONFIRM_TIME:
+                # do the strict colour check
+                if self._confirm(frame, cx, cy, w, h):
+                    # it's the Monster can — hover and stay
+                    self._stop_rc()
+                    self._draw_status(frame, w, h, "[HUNT] TARGET CONFIRMED — hovering", (0, 255, 80))
+                else:
+                    # not the can — back off and keep searching
+                    self._confirming  = False
+                    self._backing_off = True
+                    self._backoff_start = time.time()
+            else:
+                # still waiting — hold position
+                self._stop_rc()
+                self._draw_status(frame, w, h,
+                    f"[HUNT] Confirming... {elapsed:.1f}s", (0, 200, 255))
+
         else:
-            # ── Target found — steer toward it ──────────────────────────────
-            self._searching = False
+            # ── Visible but not close yet — approach ─────────────────────────
+            self._confirming = False
+            self._searching  = False
             self._steer(cx, cy, area, w, h)
             self._draw_target(frame, cx, cy, area, w, h)
 
@@ -94,15 +122,13 @@ class HuntMode:
 
     # ── Detection ─────────────────────────────────────────────────────────────
 
-    def _detect(self, frame, w, h):
-        """
-        Return (cx, cy, area) of the largest Monster-green blob, or
-        (None, None, None) if nothing found.
-        """
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, _HSV_LO, _HSV_HI)
+    def _detect(self, frame, w, h, strict=False):
+        lo   = _HSV_STRICT_LO if strict else _HSV_LO
+        hi   = _HSV_STRICT_HI if strict else _HSV_HI
 
-        # clean up noise
+        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, lo, hi)
+
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
         mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
@@ -112,23 +138,50 @@ class HuntMode:
         if not contours:
             return None, None, None
 
-        biggest = max(contours, key=cv2.contourArea)
-        area_px = cv2.contourArea(biggest)
+        biggest  = max(contours, key=cv2.contourArea)
+        area_px  = cv2.contourArea(biggest)
         if area_px < _MIN_AREA:
+            return None, None, None
+
+        # aspect ratio check — Monster can is taller than wide
+        x, y, bw, bh = cv2.boundingRect(biggest)
+        aspect = bh / bw if bw > 0 else 0
+        if aspect < 0.8:
             return None, None, None
 
         M  = cv2.moments(biggest)
         cx = int(M['m10'] / M['m00'])
         cy = int(M['m01'] / M['m00'])
 
-        # normalise area to fraction of total frame
         area_frac = area_px / (w * h)
         return cx, cy, area_frac
+
+    def _confirm(self, frame, cx, cy, w, h):
+        """
+        Strict check at close range.
+        Crops a region around the target and checks what fraction
+        of it matches the strict Monster-green HSV range.
+        """
+        crop_size = int(min(w, h) * 0.25)
+        x1 = max(0, cx - crop_size // 2)
+        y1 = max(0, cy - crop_size // 2)
+        x2 = min(w, cx + crop_size // 2)
+        y2 = min(h, cy + crop_size // 2)
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return False
+
+        hsv  = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, _HSV_STRICT_LO, _HSV_STRICT_HI)
+
+        ratio = np.count_nonzero(mask) / mask.size
+        print(f"[HUNT] Confirm ratio: {ratio:.2f} (need {_CONFIRM_RATIO})")
+        return ratio >= _CONFIRM_RATIO
 
     # ── Steering ──────────────────────────────────────────────────────────────
 
     def _steer(self, cx, cy, area_frac, w, h):
-        """Compute and send RC controls to home in on the target."""
         now = time.time()
         if now - self._last_tick < _SEARCH_TICK:
             return
@@ -137,29 +190,14 @@ class HuntMode:
         frame_cx = w / 2
         frame_cy = h / 2
 
-        # normalised offsets  (-1 … +1)
         dx = (cx - frame_cx) / (w / 2)
         dy = (cy - frame_cy) / (h / 2)
 
-        # ── yaw (left/right) ────────────────────────────────────────────────
-        if abs(dx) > _CENTRE_DEAD_X:
-            yaw = int(np.sign(dx) * _YAW_SPEED)
-        else:
-            yaw = 0
+        yaw = int(np.sign(dx) * _YAW_SPEED) if abs(dx) > _CENTRE_DEAD_X else 0
+        ud  = int(-np.sign(dy) * _UD_SPEED)  if abs(dy) > _CENTRE_DEAD_Y else 0
 
-        # ── up/down ─────────────────────────────────────────────────────────
-        if abs(dy) > _CENTRE_DEAD_Y:
-            ud = int(-np.sign(dy) * _UD_SPEED)   # negative dy = target above
-        else:
-            ud = 0
-
-        # ── forward ─────────────────────────────────────────────────────────
-        # only move forward when reasonably centred and not already close
         centred = abs(dx) <= _CENTRE_DEAD_X * 1.5
-        if centred and area_frac < _CLOSE_AREA:
-            fb = _FB_SPEED
-        else:
-            fb = 0
+        fb = _FB_SPEED if centred and area_frac < _CLOSE_AREA else 0
 
         self.tello.send_rc_control(0, fb, ud, yaw)
 
@@ -169,21 +207,19 @@ class HuntMode:
         except Exception:
             pass
 
+    def _reset_states(self):
+        self._searching   = False
+        self._confirming  = False
+        self._backing_off = False
+
     # ── HUD drawing ───────────────────────────────────────────────────────────
 
     def _draw_target(self, frame, cx, cy, area_frac, w, h):
-        """Draw a crosshair + info banner on the frame."""
         colour = (0, 255, 80)
-
-        # crosshair
         cv2.circle(frame, (cx, cy), 18, colour, 2)
         cv2.line(frame, (cx - 26, cy), (cx + 26, cy), colour, 2)
         cv2.line(frame, (cx, cy - 26), (cx, cy + 26), colour, 2)
-
-        # line from frame centre to target
         cv2.line(frame, (w // 2, h // 2), (cx, cy), colour, 1)
-
-        # status text
         close_txt = "CLOSE — hovering" if area_frac >= _CLOSE_AREA else "APPROACHING"
         cv2.putText(frame, f"[HUNT] {close_txt}",
                     (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
@@ -191,10 +227,12 @@ class HuntMode:
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 1)
 
     def _draw_searching(self, frame, w, h):
-        """Draw a 'searching' banner."""
         colour = (0, 160, 255)
         cv2.putText(frame, "[HUNT] Searching for Monster can...",
                     (10, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
-        # small spinning indicator — just a pulsing circle in the corner
         radius = int(12 + 6 * abs(np.sin(time.time() * 3)))
         cv2.circle(frame, (w - 30, 30), radius, colour, 2)
+
+    def _draw_status(self, frame, w, h, text, colour):
+        cv2.putText(frame, text, (10, h - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
