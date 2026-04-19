@@ -4,7 +4,7 @@ import time
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 
-_HSV_LO = np.array([36,  80, 80],  dtype=np.uint8)
+_HSV_LO = np.array([35, 60, 60],  dtype=np.uint8)
 _HSV_HI = np.array([82, 255, 255], dtype=np.uint8)
 
 # Strict range for confirmation (stage 2)
@@ -28,7 +28,7 @@ _BACKOFF_TIME = 1.0      # seconds to back away after failed confirmation
 
 # ── Patrol (square + 360 scan) constants ─────────────────────────────────────
 
-_PATROL_SIDE_DURATION  = 1.5    # seconds to fly each side — tune in lab for room size
+_PATROL_SIDE_DURATION  = 1.0   # seconds to fly each side — tune in lab for room size
 _PATROL_TURN_DURATION  = 0.8    # seconds to yaw 90 degrees
 _PATROL_SCAN_DURATION  = 0.4    # seconds per scan yaw tick
 _PATROL_SCAN_TICKS     = 8      # 8 ticks * 0.4s * yaw35 ≈ full 360
@@ -37,7 +37,7 @@ _PATROL_TURN_YAW       = 40     # yaw speed for 90 degree corner turn
 _PATROL_SCAN_YAW       = 35     # yaw speed during 360 scan
 
 # ── Debug flag ────────────────────────────────────────────────────────────────
-_DEBUG_HSV = False   # set True in lab to print centre-pixel HSV values
+_DEBUG_HSV = True   # set True in lab to print centre-pixel HSV values
 
 
 class HuntMode:

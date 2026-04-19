@@ -95,6 +95,15 @@ class TelloUI:
         self.hunt_mode = HuntMode(tello)
         print("[INFO] Hunt mode initialised")
 
+        # ── Recall / breadcrumb state ─────────────────────────────────────────
+        self._breadcrumbs        = []           # list of (lr, fb, ud, yaw, duration)
+        self._recall_active      = False
+        self._recall_steps       = []
+        self._recall_index       = 0
+        self._recall_step_start  = 0.0
+        self._current_crumb_start = time.time()
+        self._current_rc         = (0, 0, 0, 0)
+
         # initialize the root window and image panel
         self.root = tki.Tk()
         self.panel = None
@@ -131,24 +140,35 @@ class TelloUI:
         self.btn_gesture.pack(side="bottom", fill="both",
                               expand=True, padx=10, pady=5)
 
-        # follow mode toggle button — activated when Follow Mode is confirmed
+        # follow mode toggle button
         self.btn_follow = tki.Button(self.root, text="Follow Mode: OFF",
                                      relief="raised", command=self._toggleFollow)
         self.btn_follow.pack(side="bottom", fill="both",
                              expand=True, padx=10, pady=5)
 
-        # hunt mode toggle button — activated when Hunt Mode is confirmed
+        # hunt mode toggle button
         self.btn_hunt = tki.Button(self.root, text="Hunt Mode: OFF",
                                    relief="raised", command=self._toggleHunt)
         self.btn_hunt.pack(side="bottom", fill="both",
                            expand=True, padx=10, pady=5)
 
+        # ── Recall button — prominent red, always visible ─────────────────────
+        self.btn_recall = tki.Button(
+            self.root,
+            text="RECALL HOME",
+            relief="raised",
+            bg="red",
+            fg="white",
+            font="Helvetica 10 bold",
+            command=self.triggerRecall
+        )
+        self.btn_recall.pack(side="bottom", fill="both",
+                             expand=True, padx=10, pady=5)
+
         # start video loop thread
         self.stopEvent = threading.Event()
 
-        # frame queue: _frameGrabLoop puts the latest frame here; videoLoop reads it.
-        # maxsize=1 means the grabber always overwrites with the freshest frame so
-        # AI processing never blocks behind a stale one.
+        # frame queue: maxsize=1 so AI processing always gets the freshest frame
         self._frame_queue = queue.Queue(maxsize=1)
 
         self._grab_thread = threading.Thread(target=self._frameGrabLoop, daemon=True)
@@ -166,21 +186,16 @@ class TelloUI:
 
     def _frameGrabLoop(self):
         """Dedicated thread: reads the latest camera frame and pushes it into
-        _frame_queue at roughly camera frame-rate.  Using a queue of maxsize=1
-        means the consumer (videoLoop) always gets the most recently captured
-        frame rather than one that was grabbed several AI-inference cycles ago.
-        """
+        _frame_queue at roughly camera frame-rate."""
         while not self.stopEvent.is_set():
             frame = self.tello.read()
             if frame is not None and frame.size > 0:
-                # drain the stale frame (if any) before pushing the new one so
-                # the queue never blocks the grabber on a slow AI cycle.
                 try:
                     self._frame_queue.get_nowait()
                 except queue.Empty:
                     pass
                 self._frame_queue.put_nowait(frame)
-            time.sleep(0.005)  # ~200 Hz polling — fast enough to stay ahead of 30 fps camera
+            time.sleep(0.005)
 
     def videoLoop(self):
         """
@@ -193,10 +208,19 @@ class TelloUI:
             self.sending_command_thread.start()
 
             while not self.stopEvent.is_set():
-                # Block until a frame is available (timeout avoids hanging on shutdown).
                 try:
                     self.frame = self._frame_queue.get(timeout=0.1)
                 except queue.Empty:
+                    continue
+
+                # ── Recall takes priority over everything ─────────────────────
+                if self._recall_active:
+                    self._process_recall()
+                    # still display the frame with recall status overlaid
+                    display_frame = self.frame.copy()
+                    self._draw_recall_status(display_frame)
+                    image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    self.root.after(0, self._updateGUIImage, image)
                     continue
 
                 display_frame = self.frame.copy()
@@ -227,11 +251,8 @@ class TelloUI:
                 # run hunt mode (mode 3)
                 display_frame = self.hunt_mode.process_frame(display_frame)
 
-                # convert BGR to RGB before passing to PIL -- drone frames are BGR
                 image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                 self.root.after(0, self._updateGUIImage, image)
-                # No fixed sleep here — the queue.get() above blocks when no new
-                # frame is ready, so the loop naturally runs at camera frame-rate.
 
         except RuntimeError as e:
             print("[INFO] caught a RuntimeError")
@@ -258,6 +279,104 @@ class TelloUI:
         """Set the quit waiting flag to True."""
         self.quit_waiting_flag = True
 
+    # ── Recall / breadcrumb system ────────────────────────────────────────────
+
+    def _log_rc(self, lr, fb, ud, yaw):
+        """
+        Log RC commands as breadcrumbs for recall.
+        Call this instead of tello.send_rc_control() for any
+        manually dispatched movement so the trail stays accurate.
+        """
+        now = time.time()
+        if self._current_rc != (lr, fb, ud, yaw):
+            duration = now - self._current_crumb_start
+            # only log meaningful movements — ignore tiny/zero commands
+            if duration > 0.1 and any(self._current_rc):
+                self._breadcrumbs.append((*self._current_rc, duration))
+                if len(self._breadcrumbs) > 120:  # cap trail length
+                    self._breadcrumbs.pop(0)
+            self._current_rc          = (lr, fb, ud, yaw)
+            self._current_crumb_start = now
+        self.tello.send_rc_control(lr, fb, ud, yaw)
+
+    def triggerRecall(self):
+        """
+        Interrupt everything and fly back to launch airspace.
+
+        Deliberately only reverses translational movement (lr, fb) at
+        reduced speed and ignores yaw/ud — this avoids compounding
+        orientation errors and gets the drone safely back to the
+        launch area rather than trying to nail the exact spot.
+        """
+        if self._recall_active:
+            print("[RECALL] Already recalling")
+            return
+
+        print("[RECALL] Recall triggered — returning to launch airspace")
+
+        # disable all active modes immediately
+        self._setFollow(False)
+        self._setHunt(False)
+        self.gesture_mode = False
+        self.btn_gesture.config(text="Gesture Control: OFF", relief="raised")
+        self.current_mode = 0
+        self.updateModeLabel()
+
+        # build reverse steps — negate translation only, zero yaw and ud
+        # rationale: unwind position errors only, not orientation errors
+        self._recall_steps = [
+            (-lr, -fb, 0, 0, duration)
+            for lr, fb, ud, yaw, duration in reversed(self._breadcrumbs)
+        ]
+        self._breadcrumbs.clear()
+        self._recall_active     = True
+        self._recall_index      = 0
+        self._recall_step_start = time.time()
+        self.btn_recall.config(text="RECALLING...", bg="orange")
+        print(f"[RECALL] {len(self._recall_steps)} steps to replay")
+
+    def _process_recall(self):
+        """
+        Step through recall breadcrumbs in reverse.
+        Called every videoLoop iteration while recall is active.
+        """
+        if not self._recall_active:
+            return
+
+        now = time.time()
+
+        if self._recall_index >= len(self._recall_steps):
+            # all steps done — hover briefly then land
+            self.tello.send_rc_control(0, 0, 0, 0)
+            self._recall_active = False
+            self.btn_recall.config(text="RECALL HOME", bg="red")
+            print("[RECALL] Back in home airspace — landing")
+            self.telloLanding()
+            return
+
+        lr, fb, ud, yaw, duration = self._recall_steps[self._recall_index]
+
+        # scale to 60% speed for a safer, more controlled return
+        lr = int(lr * 0.6)
+        fb = int(fb * 0.6)
+
+        if now - self._recall_step_start >= duration:
+            self._recall_index      += 1
+            self._recall_step_start  = now
+        else:
+            self.tello.send_rc_control(lr, fb, 0, 0)
+
+    def _draw_recall_status(self, frame):
+        """Overlay recall status on frame during return journey."""
+        h, w = frame.shape[:2]
+        steps_left = len(self._recall_steps) - self._recall_index
+        cv2.putText(frame, f"[RECALL] Returning to launch airspace...",
+                    (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+        cv2.putText(frame, f"Steps remaining: {steps_left}",
+                    (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 1)
+
+    # ── Mode system ───────────────────────────────────────────────────────────
+
     def updateModeLabel(self):
         """Update the mode label with text indicator."""
         self.mode_label.config(
@@ -278,21 +397,18 @@ class TelloUI:
         print(f"[MODE] Pending: {MODES[self.pending_mode]} - show Thumbs Up to confirm")
 
     def confirmMode(self):
-        """Thumbs up -- confirm the pending mode and apply any mode effects."""
+        """Thumbs up — confirm the pending mode and apply any mode effects."""
         if self.pending_mode is not None:
             self.current_mode = self.pending_mode
             self.pending_mode = None
             self.updateModeLabel()
 
-            # Mode 2: Follow — person following ON, hunt OFF
             if self.current_mode == 2:
                 self._setFollow(True)
                 self._setHunt(False)
-            # Mode 3: Hunt — hunt ON, person following OFF
             elif self.current_mode == 3:
                 self._setHunt(True)
                 self._setFollow(False)
-            # Any other mode — disable both
             else:
                 self._setFollow(False)
                 self._setHunt(False)
@@ -335,7 +451,7 @@ class TelloUI:
             return
 
         if gesture_id == 0:
-            self.tello.send_command('command')  # hover, not stop
+            self.tello.send_command('command')  # hover
         elif gesture_id == 1:
             self.telloLanding()
         elif gesture_id == 2:
@@ -363,7 +479,6 @@ class TelloUI:
     def _toggleFollow(self):
         """Toggle person following on or off and update the button label."""
         active = self.person_follower.toggle()
-        # if we're manually toggling follow, turn off hunt to avoid conflicts
         if active:
             self._setHunt(False)
             self.btn_follow.config(text="Follow Mode: ON", relief="sunken")
@@ -388,7 +503,6 @@ class TelloUI:
     def _toggleHunt(self):
         """Toggle hunt mode on or off and update the button label."""
         active = self.hunt_mode.toggle()
-        # if we're manually toggling hunt, turn off follow to avoid conflicts
         if active:
             self._setFollow(False)
             self.btn_hunt.config(text="Hunt Mode: ON", relief="sunken")
@@ -428,7 +542,6 @@ class TelloUI:
         self.btn_takeoff.pack(side="bottom", fill="both",
                               expand=True, padx=10, pady=5)
 
-        # binding arrow keys to drone control
         self.tmp_f = tki.Frame(panel, width=100, height=2)
         self.tmp_f.bind('<KeyPress-w>', self.on_keypress_w)
         self.tmp_f.bind('<KeyPress-s>', self.on_keypress_s)
@@ -498,7 +611,7 @@ class TelloUI:
         ts = datetime.datetime.now()
         filename = "{}.jpg".format(ts.strftime("%Y-%m-%d_%H-%M-%S"))
         p = os.path.sep.join((self.outputPath, filename))
-        cv2.imwrite(p, self.frame)  # self.frame is already BGR -- write directly
+        cv2.imwrite(p, self.frame)
         print("[INFO] saved {}".format(filename))
 
     def pauseVideo(self):
