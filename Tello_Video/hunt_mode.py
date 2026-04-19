@@ -4,14 +4,14 @@ import time
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 
-_HSV_LO = np.array([35,  60, 60],  dtype=np.uint8)   # looser for stage 1
+_HSV_LO = np.array([32,  40, 40],  dtype=np.uint8)   # looser for stage 1 needed lowering was [35, 60, 60]
 _HSV_HI = np.array([85, 255, 255], dtype=np.uint8)
 
 # Strict range for confirmation (stage 2)
 _HSV_STRICT_LO = np.array([40,  100, 100], dtype=np.uint8)
 _HSV_STRICT_HI = np.array([75,  255, 255], dtype=np.uint8)
 
-_MIN_AREA       = 1_200
+_MIN_AREA       = 400
 _CENTRE_DEAD_X  = 0.18
 _CENTRE_DEAD_Y  = 0.18
 _CLOSE_AREA     = 0.10
@@ -126,10 +126,11 @@ class HuntMode:
         lo   = _HSV_STRICT_LO if strict else _HSV_LO
         hi   = _HSV_STRICT_HI if strict else _HSV_HI
 
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, lo, hi)
+        blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+        hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        mask    = cv2.inRange(hsv, lo, hi)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
         mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -146,7 +147,7 @@ class HuntMode:
         # aspect ratio check — Monster can is taller than wide
         x, y, bw, bh = cv2.boundingRect(biggest)
         aspect = bh / bw if bw > 0 else 0
-        if aspect < 0.8:
+        if aspect < 0.5:
             return None, None, None
 
         M  = cv2.moments(biggest)
