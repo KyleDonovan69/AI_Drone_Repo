@@ -49,6 +49,10 @@ class PersonFollower:
         self.active: bool = False
         self._last_cmd_time: float = 0.0
 
+        # look-around state — used when person is lost
+        self._last_look: str = 'right'   # alternate left/right each tick
+        self._look_tick: float = 0.0     # time of last look-around yaw
+
         self._pose = mp.solutions.pose.Pose(  # type: ignore[attr-defined]
             model_complexity=0,              # lightest model — best for real-time
             min_detection_confidence=0.5,
@@ -96,9 +100,9 @@ class PersonFollower:
             if self.active:
                 self._compute_and_send(results.pose_landmarks.landmark)
         else:
-            # No person visible then stop moving
+            # No person visible — look left and right to find them again
             if self.active:
-                self._throttled_rc(0, 0, 0, 0)
+                self._look_around()
 
         self._draw_status(annotated)
         return annotated
@@ -149,6 +153,19 @@ class PersonFollower:
             fb = int(np.clip(-size_err * 150, -self.MAX_FB, self.MAX_FB))
 
         self._throttled_rc(0, fb, ud, yaw)
+
+    def _look_around(self) -> None:
+        """Slowly alternate yaw left/right to search for a lost person."""
+        now = time.time()
+        if now - self._look_tick < 0.8:   # hold each direction for 0.8 s
+            return
+        self._look_tick = now
+        if self._last_look == 'right':
+            self._tello.send_rc_control(0, 0, 0, -20)  # look left
+            self._last_look = 'left'
+        else:
+            self._tello.send_rc_control(0, 0, 0, 20)   # look right
+            self._last_look = 'right'
 
     def _throttled_rc(self, lr: int, fb: int, ud: int, yaw: int) -> None:
         """Send RC only if the command interval has elapsed."""

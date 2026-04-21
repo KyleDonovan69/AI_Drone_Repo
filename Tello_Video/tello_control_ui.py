@@ -107,6 +107,10 @@ class TelloUI:
         # ── Battery safety ───────────────────────────────────────────────────
         self._last_battery_check = 0.0   # time of last check
         self._battery_check_interval = 30.0  # seconds between checks
+        self._battery_level: int = -1 
+
+        # ── Flight state ───────────────────────────────────────────────────
+        self._airborne = False
 
         # initialize the root window and image panel
         self.root = tki.Tk()
@@ -221,7 +225,11 @@ class TelloUI:
                 now = time.time()
                 if now - self._last_battery_check >= self._battery_check_interval:
                     self._last_battery_check = now
-                    self.tello.check_battery_safety(threshold=15)
+                    self._battery_level = self.tello.get_battery()
+                    if isinstance(self._battery_level, int) and self._battery_level <= 15:
+                        print(f"[CRITICAL] Battery low ({self._battery_level}%). Landing for safety.")
+                        self.tello.send_rc_control(0, 0, 0, 0)
+                        self.telloLanding()
 
                 # ── Recall takes priority over everything ─────────────────────
                 if self._recall_active:
@@ -261,6 +269,7 @@ class TelloUI:
                 # run hunt mode (mode 3)
                 display_frame = self.hunt_mode.process_frame(display_frame)
 
+                self._draw_battery_hud(display_frame)
                 image = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                 self.root.after(0, self._updateGUIImage, image)
 
@@ -385,6 +394,22 @@ class TelloUI:
         cv2.putText(frame, f"Steps remaining: {steps_left}",
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 1)
 
+    def _draw_battery_hud(self, frame):
+        """Draw battery percentage in the top-right corner of the frame."""
+        if self._battery_level < 0:
+            return  # not yet read
+        h, w = frame.shape[:2]
+        if self._battery_level <= 15:
+            colour = (0, 0, 220)    # red — critical
+        elif self._battery_level <= 30:
+            colour = (0, 165, 255)  # orange — low
+        else:
+            colour = (0, 220, 0)    # green — ok
+        text = f"BAT: {self._battery_level}%"
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        cv2.putText(frame, text, (w - tw - 10, th + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, colour, 2)
+
     # ── Mode system ───────────────────────────────────────────────────────────
 
     def updateModeLabel(self):
@@ -461,7 +486,12 @@ class TelloUI:
             return
 
         if gesture_id == 0:
-            self.tello.send_command('command')  # hover
+            if self._airborne:
+                self.tello.send_command('command')  # hover
+                print("[GESTURE] Open Palm → Hover")
+            else:
+                self.telloTakeOff()
+                print("[GESTURE] Open Palm → Takeoff")
         elif gesture_id == 1:
             self.telloLanding()
         elif gesture_id == 2:
@@ -634,10 +664,14 @@ class TelloUI:
             self.tello.video_freeze(True)
 
     def telloTakeOff(self):
-        return self.tello.takeoff()
+        result = self.tello.takeoff()
+        self._airborne = True
+        return result
 
     def telloLanding(self):
-        return self.tello.land()
+        result = self.tello.land()
+        self._airborne = False
+        return result
 
     def telloFlip_l(self):
         return self.tello.flip('l')
