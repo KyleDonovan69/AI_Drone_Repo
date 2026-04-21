@@ -115,7 +115,7 @@ class HuntMode:
 
             if elapsed >= _CONFIRM_TIME:
                 if self._confirm(frame, cx, cy, w, h):
-                    self.active = False  # <--- MOVE THIS TO THE TOP OF THE BLOCK
+                    self.active = False  
                     self._stop_rc()
                     print("[HUNT] TARGET CONFIRMED — Initiating Safe Landing")
                     
