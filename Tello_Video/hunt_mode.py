@@ -20,7 +20,7 @@ _CONFIRM_RATIO  = 0.45   # 45% of bounding box must be strict-green to confirm
 _YAW_SPEED   = 30
 _UD_SPEED    = 15
 _FB_SPEED    = 15
-_BACK_SPEED  = 20        # reverse speed during failed confirmation
+_BACK_SPEED  = 10        # reverse speed during failed confirmation
 _SEARCH_TICK = 0.30
 
 _CONFIRM_TIME = 1.0      # seconds to hold position and check before deciding
@@ -115,8 +115,16 @@ class HuntMode:
 
             if elapsed >= _CONFIRM_TIME:
                 if self._confirm(frame, cx, cy, w, h):
+                    self.active = False  # <--- MOVE THIS TO THE TOP OF THE BLOCK
                     self._stop_rc()
-                    self._draw_status(frame, w, h, "[HUNT] TARGET CONFIRMED — hovering", (0, 255, 80))
+                    print("[HUNT] TARGET CONFIRMED — Initiating Safe Landing")
+                    
+                    # Check height and land
+                    current_height = self.tello.get_height()
+                    if current_height > 30:
+                        self.tello.move_down(0.2)
+                        
+                    self.tello.land()
                 else:
                     self._confirming  = False
                     self._backing_off = True

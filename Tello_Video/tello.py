@@ -465,3 +465,23 @@ class Tello:
         """
 
         return self.move('up', distance)
+        
+    def check_battery_safety(self, threshold=10):
+        """
+        Checks battery level and initiates emergency landing if below threshold.
+        Returns True if battery is safe, False if emergency landing triggered.
+        """
+        try:
+            # We use our existing get_battery method
+            level = self.get_battery()
+            
+            # Sometimes the Tello returns 'none_response' or non-int
+            if isinstance(level, int) and level <= threshold:
+                print(f"[CRITICAL] Battery low ({level}%). Landing for safety.")
+                self.send_rc_control(0, 0, 0, 0) # Stop all movement
+                self.land()
+                return False
+            return True
+        except Exception as e:
+            print(f"[SAFETY] Battery check failed: {e}")
+            return True # Don't kill the mission just because one packet dropped
