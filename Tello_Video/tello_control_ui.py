@@ -104,6 +104,10 @@ class TelloUI:
         self._current_crumb_start = time.time()
         self._current_rc         = (0, 0, 0, 0)
 
+        # ── Battery safety ───────────────────────────────────────────────────
+        self._last_battery_check = 0.0   # time of last check
+        self._battery_check_interval = 30.0  # seconds between checks
+
         # initialize the root window and image panel
         self.root = tki.Tk()
         self.panel = None
@@ -212,6 +216,12 @@ class TelloUI:
                     self.frame = self._frame_queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
+
+                # ── Battery safety check (every 30 s) ────────────────────────
+                now = time.time()
+                if now - self._last_battery_check >= self._battery_check_interval:
+                    self._last_battery_check = now
+                    self.tello.check_battery_safety(threshold=15)
 
                 # ── Recall takes priority over everything ─────────────────────
                 if self._recall_active:

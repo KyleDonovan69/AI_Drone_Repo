@@ -388,6 +388,11 @@ class Tello:
         """
         return self._battery
 
+    def check_battery_safety(self, threshold=10):
+        """Simulator check, always returns True (no real battery to check)."""
+        print(f"[SIM] Battery check skipped (sim battery: {self._battery}%)")
+        return True
+
     def get_flight_time(self):
         """Returns the number of seconds elapsed during flight.
 

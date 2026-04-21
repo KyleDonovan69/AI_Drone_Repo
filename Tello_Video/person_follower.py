@@ -25,7 +25,8 @@ class PersonFollower:
     MAX_FB: int = 25
 
     # ── Dead-bands (normalised 0–1) — ignore tiny errors to avoid jitter ─
-    DEAD_ZONE: float = 0.0
+    DEAD_ZONE: float = 0.05
+    UD_DEAD_ZONE: float = 0.05
     SIZE_DEAD_ZONE: float = 0.07
 
     # ── Target apparent size (shoulder-to-hip height as fraction of frame) ─
@@ -138,7 +139,7 @@ class PersonFollower:
         # ── Up/Down: keep shoulders at vertical mid-frame ───────────-
         # Image Y increases downward, so negate: person low > drone moves down
         ud = 0
-        if abs(y_err) > self.DEAD_ZONE:
+        if abs(y_err) > self.UD_DEAD_ZONE:
             ud = int(np.clip(-y_err * 100, -self.MAX_UD, self.MAX_UD))
 
         # ── Forward/Back: maintain target apparent body size ─────────
