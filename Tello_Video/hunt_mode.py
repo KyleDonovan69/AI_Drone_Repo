@@ -14,7 +14,7 @@ _HSV_STRICT_HI = np.array([75,  255, 255], dtype=np.uint8)
 _MIN_AREA       = 400
 _CENTRE_DEAD_X  = 0.18
 _CENTRE_DEAD_Y  = 0.18
-_CLOSE_AREA     = 0.10
+_CLOSE_AREA     = 0.075
 _CONFIRM_RATIO  = 0.45   # 45% of bounding box must be strict-green to confirm
 
 _YAW_SPEED   = 30
@@ -37,7 +37,7 @@ _PATROL_TURN_YAW       = 40     # yaw speed for 90 degree corner turn
 _PATROL_SCAN_YAW       = 35     # yaw speed during 360 scan
 
 # ── Debug flag ────────────────────────────────────────────────────────────────
-_DEBUG_HSV = True   # set True in lab to print centre-pixel HSV values
+_DEBUG_HSV = False   # set True in lab to print centre-pixel HSV values
 
 
 class HuntMode:
